@@ -5,7 +5,8 @@
 // Cheats (hle_cheats.c): the Cheats menu's rows toggle, reload (⌘R) and open the cheats folder; its first item "Show Cheats
 // Window" (⌘⇧C, or DM_CHEATS_WINDOW=1 at launch) opens a Cheats panel beside the game: sections, search, the master switch,
 // safe mode, values, details and the import of cheat files (see the code below).
-// Key map (Nintendo layout): WASD left stick, arrow keys D-pad (with Shift held: the right stick, for the camera), J=A K=B U=X I=Y, Q=L E=R, Z=ZL C=ZR, F=press left stick G=press right stick, Return=+ Tab=−, Space=shake the controller.
+// Key map (Ryujinx's default keyboard layout): Z=A X=B C=X V=Y, WASD left stick (F presses it), IJKL right stick (H presses it; Shift + arrow keys too), E=L U=R Q=ZL O=ZR,
+// arrow keys D-pad, = (or keypad +) is +, - (or keypad −) is −, Space=shake the controller.
 // Controllers: face buttons as on the iPhone, by position (right A, bottom B, top X, left Y) or on a Nintendo pad by its labels (pad_apple.h), shoulders L R, triggers ZL ZR, Menu + Options −, both sticks and their presses.
 // Each controller is a player of its own (local co-op): the first one connected is player 1, together with the keyboard, the next player 2, and so on up to 8 (pad_slots.h);
 // DM_PAD_MERGE=1 merges every controller into player 1 instead, DM_KBD_PLAYER=own makes the keyboard player 1 on its own, with the controllers from player 2 on.
@@ -34,6 +35,7 @@ static CAMetalLayer *g_layer;
 static uint64_t g_btn;
 static int g_w, g_a, g_s, g_d;
 static int g_rl, g_ru, g_rr, g_rd;   // arrow keys pressed with Shift held: the right stick (each goes back up as it went down, whatever Shift does meanwhile)
+static int g_kj, g_ki, g_kl, g_kk;   // J I L K: the right stick (left, up, right, down)
 static int g_input_on = 1;   // main thread: the game window is key, so its keyboard, mouse and controllers reach the game (input_release / input_resume)
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
@@ -124,15 +126,15 @@ static void cursor_hide_for_input(void) {
 }
 static void push(void) {
     int32_t lx = (g_d - g_a) * 32767, ly = (g_w - g_s) * 32767;
-    int32_t rx = (g_rr - g_rl) * 32767, ry = (g_ru - g_rd) * 32767;
+    int32_t rx = ((g_rr | g_kl) - (g_rl | g_kj)) * 32767, ry = ((g_ru | g_ki) - (g_rd | g_kk)) * 32767;
     dm_input_set(g_btn, lx, ly, rx, ry);
 }
 static int key_bit(unsigned short code) {
     switch (code) {
-        case 38: return 0;  case 40: return 1;  case 32: return 2;  case 34: return 3;    // J K U I → A B X Y
-        case 3: return 4;   case 5: return 5;                                            // F G → press stick
-        case 12: return 6;  case 14: return 7;  case 6: return 8;   case 8: return 9;    // Q E Z C → L R ZL ZR
-        case 36: return 10; case 48: return 11;                                          // Return Tab → + −
+        case 6: return 0;   case 7: return 1;   case 8: return 2;   case 9: return 3;     // Z X C V → A B X Y
+        case 3: return 4;   case 4: return 5;                                            // F H → press stick
+        case 14: return 6;  case 32: return 7;  case 12: return 8;  case 31: return 9;   // E U Q O → L R ZL ZR
+        case 24: case 69: return 10; case 27: case 78: return 11;                        // = (keypad +) → +, - (keypad −) → −
         case 123: return 12; case 126: return 13; case 124: return 14; case 125: return 15; // ← ↑ → ↓
     }
     return -1;
@@ -147,11 +149,12 @@ static int cp_poll(void);
 static void on_key(NSEvent *e, int down) {
     if (!g_input_on) return;
     unsigned short c = e.keyCode;
-    if (cp_blocks_input(g_cp.phase)) {   // the prompt has the keyboard: Return or J (A) is done, Escape or K (B) closes it, no key reaches the game
-        if (down && g_cp.phase == CP_OPEN) { if (c == 53 || c == 40) g_cp_cancel = 1; else if (c == 36 || c == 38) g_cp_confirm = 1; cp_poll(); }
+    if (cp_blocks_input(g_cp.phase)) {   // the prompt has the keyboard: Return or Z (A) is done, Escape or X (B) closes it, no key reaches the game
+        if (down && g_cp.phase == CP_OPEN) { if (c == 53 || c == 7) g_cp_cancel = 1; else if (c == 36 || c == 6) g_cp_confirm = 1; cp_poll(); }
         return;
     }
-    switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break; }
+    switch (c) { case 13: g_w = down; break; case 0: g_a = down; break; case 1: g_s = down; break; case 2: g_d = down; break;
+                 case 38: g_kj = down; break; case 34: g_ki = down; break; case 37: g_kl = down; break; case 40: g_kk = down; break; }
     // An arrow key pressed with Shift held is the right stick until it is released; without Shift, the D-pad. The keyboard had no right stick: a 3D game's camera
     // could be turned only with a controller (Donkey Kong Bananza)
     int *rs = c == 123 ? &g_rl : c == 126 ? &g_ru : c == 124 ? &g_rr : c == 125 ? &g_rd : NULL;
@@ -159,7 +162,7 @@ static void on_key(NSEvent *e, int down) {
     int b = key_bit(c);
     uint64_t m = b >= 0 ? 1ull << b : c == 49 ? DM_BTN_SHAKE : 0;   // Space: shaken while held
     g_btn = down ? (g_btn | m) : (g_btn & ~m);
-    if (down && (m || c == 13 || c == 0 || c == 1 || c == 2)) cursor_hide_for_input();   // a key the game takes (WASD: the left stick)
+    if (down && (m || c == 13 || c == 0 || c == 1 || c == 2 || c == 38 || c == 34 || c == 37 || c == 40)) cursor_hide_for_input();   // a key the game takes (WASD, IJKL: the sticks)
     push();
 }
 
@@ -314,7 +317,7 @@ static void input_release(void) {
     display_awake(0);
     g_input_on = 0;
     dm_motion_pro_active(0); hidpad_motion_clear();
-    g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
+    g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; g_kj = g_ki = g_kl = g_kk = 0; push();
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     pads_release();
 }
@@ -509,7 +512,7 @@ int front_ctrl_support(int min, int max) {
     if (!g_layer) return -1;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
     dispatch_async(dispatch_get_main_queue(), ^{
-        g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();   // nothing the game held stays pressed while the prompt has the input
+        g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; g_kj = g_ki = g_kl = g_kk = 0; push();   // nothing the game held stays pressed while the prompt has the input
         if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
         pads_release();
         int a, b; cp_buttons(&a, &b);
@@ -1599,7 +1602,7 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     dispatch_sync(dispatch_get_main_queue(), ^{
         // The box takes the keyboard and the mouse, so the game window never sees the key-up of the button or the touch-up of the click that opened it: nothing may stay pressed
         // while it is up, or the game reads the stuck button / touch the moment the box closes (Stardew Valley's character creation re-opened the keyboard endlessly)
-        g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; push();
+        g_btn = 0; g_w = g_a = g_s = g_d = 0; g_rl = g_ru = g_rr = g_rd = 0; g_kj = g_ki = g_kl = g_kk = 0; push();
         dm_touch_set(NULL, 0);
         int min_chars = g_swkbd_min_chars > 0 ? g_swkbd_min_chars : 0;
         NSString *info = [NSString stringWithFormat:@"%s%s%s", sub ? sub : "", sub && *sub && guide && *guide ? "\n" : "", guide ? guide : ""];
